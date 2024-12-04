@@ -83,7 +83,7 @@
     - Bucket joins can be much faster than shuffle joins
     - Sorted-merge Bucket (SMB) joins can do joins without Shuffle at all!
 
-## ow long should you hold onto fact data?
+## How long should you hold onto fact data?
 
 - High volumes make fact data much more costly to hold onto for a long time
 - Big tech had an interesting approach here

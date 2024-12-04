@@ -1,130 +1,307 @@
-## What is a fact?
+# Fact Data Modeling Day 1 Lab Notes
 
-- Think of a fact as something that happended or occured.
-    - A user logs in to an app
-    - A transaction is made
-    - You run a mile with your fitbit
-- Facts are not slowly changing which makes them easier to model than dimensions in some respects.
+- For this lab we are going to be using the table **`game_details`** and also **`games`**
+- When we are working with a fact table, the grain of the table matters a lot. Let's see if we have duplicates for the fields **`game_id`**, **`team_id`**, and **`player_id`**
 
-## What makes fact modelling hard?
+    ```sql
+    SELECT
+        game_id, team_id, player_id, COUNT(1)
+    FROM game_details
+    GROUP BY 1,2,3
+    HAVING COUNT(1) > 1
+    ```
 
-- Fact data is usually 10-100x the volume of dimension data
-    - Facebook had 2B active users when Zach worked there and sent 50B notifications every day
-- Fact data can need a lot of context for effective analysis
-    - Say FB sent a notification, 20 minutes later you click on it, 5 minutes later you bought something. We have that funnel of sent to click to bought, all 3 activities are facts. If we have a notification in isolation, it is worthless.
-    - Think about what other data or dimension do we need to make this fact data more valuable? Another example say that we don't have that conversion step/ that purchase step but we have sent and click / click through rate, we brought in another dimension which is user, now we can see that user in Canada has a better click through rate compared to US.
-- Duplicates in facts are way more common than in dimensional data
-    - Caused by software engineer team pushing a bug in the logger that logs 2 records everytime a user clicks.
+- There's almost 2 of every records in the table
 
-## How does fact modeling work
+    ![alt text](assets/image9.png)
 
-- Normalization vs Denormalization
-    - Normalized facts don't have any dimensional attributes, just IDs to join to get that information.
-        - User ID 17 logged in at this date, this is a record
-    - Denormalized facts bring in some dimensional attributes for quicker analysis at the cost of more storage.
-        - User ID 17 name Zach, 29 year old from US, this is a record
-        - Brings in more dimension by joins
-- Both normalized and denormalized fatcs have a place in this world.
-- Fact data and raw logs are not the same thing
-    - Raw logs
-        - Ugly schemas designed for online systems that make data analysis sad
-        - Potentially contains duplicates and other quality errors
-        - Usually have shorter retention
-        - At FB, the raw logs are owned by software engineers who works with online systems and keeping the server running so they don't really care about log data. As a data engineer, work with software engineer to get the data logged in the correct format
-    - Fact data
-        - Nice column names
-        - Quality guarantees like uniqueness, not null, etc
-        - Longer retention
-- Think of it as a few Who, What, Where, When, and How
-    - "Who" fields are usually pushed out as IDs (this user clicked this button, we only hold the user_id not the entire user object)
-    - "Where" fields are most likely modeled out like Who with "IDs" to join, but more likely to bring in dimensions, especially if they're high cardinality like "device_id"
-    - "How" fields are very similar to "Where" fields. "He used an iphone to make this click"
-    - "What" fields are fundamentally part of the nature of the fact
-        - In notification world - "GENERATED", "SENT", "CLICKED", "DELIVERED"
-    -"When" fields are fundamentally part of the nature of the fact
-        - Mostly an "event_timestamp" field or "event_date"
-- Fact datasets should have quality guarantees
-    - If they didn't, analysis would just go to the raw logs!
-    - No duplicates, "What" and "When" fields should always be not null
-- Fact data should generally be smaller than raw logs
-- Fact data should parse out hard-to-understand columns!
+- We want to create a filter to remove the duplicates. We filter on **`row_num`** = 1 to get rid of the duplicates
 
-## When should you bring or model in dimensions?
+    ```sql
+    WITH deduped AS (
 
-- Example
-    - Network logs pipeline (link)
-    - The largest pipeline Zach ever worked on. Over 100 TBs/hr
-    - We wanted to see which microservice app each network request came from and went to
-    - Modeling this as a traditional fact data
-    - IP address would be the identifier for the app
-    - This worked for IPv4 domains because the cardinality was small enough (5 GB)
-    - This pipeline design couldn't be used to support IPv6 domains though because that search space was too large to be broadcasted
-- Example solution
-    - The slam dunk solution here was to log the "app" field with each network request and getting rid of the join entirely. DENORMALIZATION SAVES THE DAY
-    - This required each microservice to adopt a "sidecar proxy" that enabled logging of which app they were!
-    - A large organizational effort to solve this issue
+        SELECT 
+            *, ROW_NUMBER() OVER(PARTITION BY game_id, team_id, player_id) AS row_num
+        FROM game_details
+            
+    )
+    SELECT * FROM deduped
+    WHERE row_num = 1
+    ```
+    ![alt text](assets/image10.png)
 
-## How does logging fit into fact data?
+- The problem with the current fact table is that we have some columns that we don't need and we also have some missing columns. We need the "When" column and we can get this by joining to **`games`** table to get the **`game_date_est`** column
 
-- Logging brings in all the critical context for your fact data
-    - Usually done in collaboration with online system engineers
-- Don't log everything!
-    - Log only what you really need
-    - Storing logs can cause cost to increase
-- Logging should conform to values specified by the online teams
-    - Thrift is what is used at Airbnb and Netflix for this
+    ```sql
+    WITH deduped AS (
 
-## Potential options when working with high volume fact data
+        SELECT 
+            g.game_date_est,
+            gd.*,
+            ROW_NUMBER() OVER(PARTITION BY gd.game_id, team_id, player_id ORDER BY g.game_date_est) AS row_num
+        FROM game_details gd
+            JOIN games g ON gd.game_id = g.game_id
+            
+    )
+    SELECT * FROM deduped
+    WHERE row_num = 1
+    ```
 
-- Sampling
-    - Doesn't work for all use cases, works best for metric-drive use-cases where imprecision isn't an issue
-- Bucketing
-    - Fact data can be bucketed by one of the important dimensions (usually user)
-    - Bucket joins can be much faster than shuffle joins
-    - Sorted-merge Bucket (SMB) joins can do joins without Shuffle at all!
+- Let's include only the columns that we care about in this fact table. Have a look at **`games`** table and see which columns should we bring to the fact table.
+- We need **`home_team_id`** and **`visitor_team_id`** because we want to see if a player plays better when they're at home or away. But we aren't going to store them as columns, we're just going to use them to determine other things.
+- We're going to use **`g.home_team_id`** and **`g.visitor_team_id`** to compare the **`team_id`** and **`game_details`** to see whether they are playing at home or away. They will be like a Boolean true or false in the fact table.
+- We don't really need **`game_id`** because every other columns in **`games`** is an aggregate and we can just aggregate the games that happens on that day and we can get back all the aggregated data ourselves.
+- As we have this line `team_id = home_team_id AS dim_is_playing_at_home` so we don't need **`g.visitor_team_id`** anymore as the result of **`dim_is_playing_at_home`** column will say True if the player are playing at home and False if they are playing away.
 
-## ow long should you hold onto fact data?
+    ```sql
+    WITH deduped AS (
 
-- High volumes make fact data much more costly to hold onto for a long time
-- Big tech had an interesting approach here
-    - Any fact tables <10 TBs, Retention didn't matter much
-        - Anonymization of facts of facts ususally happened after 60-90 days though and the data would be moved to a new table with the Pll stripped
-    - Any fact tables>100 TBs, VERY SHORT RETENTION (~14 days or less)
+        SELECT 
+            g.game_date_est,
+            g.season,
+            g.home_team_id,
+            gd.*,
+            ROW_NUMBER() OVER(PARTITION BY gd.game_id, team_id, player_id ORDER BY g.game_date_est) AS row_num
+        FROM game_details gd
+            JOIN games g ON gd.game_id = g.game_id
+            
+    )
+    SELECT
+        game_date_est,
+        season,
+        team_id,
+        team_id = home_team_id AS dim_is_playing_at_home,
+        player_id,
+        player_name,
+        start_position,
+        comment,
+        min,
+        fgm,
+        fga,
+        fg3m,
+        fg3a,
+        ftm,
+        fta,
+        oreb,
+        dreb,
+        reb,
+        ast,
+        stl,
+        blk,
+        "TO" AS turnovers,
+        pf,
+        pts,
+        plus_minus
+    FROM deduped
+    WHERE row_num = 1
+    ```
 
-## Deduplication of fact data
+    ![alt text](assets/image11.png)
 
-- Facts can be deduplicated
-    - You can click a notification multiple times
-- How do you pick the right window for deduplication?
-    - No duplicates in a day? An hour? A week?
-    - Looking at distributtions of duplicates here is a good idea
-- Intraday deduping options
-    - Streaming
-    - Microbatch
-- Streaming allows you to capture most duplicates in a very efficient manner
-    - Windowing matters here
-    - Entire day duplicates can be harder for streaming because it needs to hold onto such a big window of memory
-    - A large memory of duplicates usually happen within a short time ofc first evennt
-    - 15 minute to hourly windows are a sweet spot
+- From the query above, the columns that we kept in the SELECT statement are fundamental nature of a fact.
+- Next, the **`comment`** column is hard to work with as it has high cardinality.
+    - DNP: Did Not Play. Sitting on the bench but not play
+    - DND: Did Not Dress. They show up to the arena but are not going to play as they don't wear their uniform
+    - NWT: Not even in the arena
+- The **`comment`** column is a great example of a raw data column that we need to parse, as it can be facts that we can learn about the players.
+- Let's create **`dim_did_not_play`**, **`dim_did_not_dress`**, **`dim_not_with_team`** out of the **`comment`** column. If the condition is true for each column, a check mark will appear. These columns are way easier to work with compared to the **`comment`** column. This is a common thing that happens when working with fact data.
 
-## Hourly Microbatch Dedupe
+    ```sql
+    WITH deduped AS (
 
-- Used to reduce landing time of daily tables that dedupe slowlu
-- Worked at Facebook using this pattern
-    - Deduplicated 50 billion notification events every day
-    - Reduced landing time form 9 hours after UTC to 1 hout after UTC
-- Dedupe each hour with GROUP BY
-    - The GROUP BY eliminates duplicates within that 1 hour
-- Use SUM and COUNT to aggregate duplicates, use COLLECT_LIST to collect metadata about the duplicates that might be different!
-    
-    ![alt text](assets/image6.png)
+        SELECT 
+            g.game_date_est,
+            g.season,
+            g.home_team_id,
+            gd.*,
+            ROW_NUMBER() OVER(PARTITION BY gd.game_id, team_id, player_id ORDER BY g.game_date_est) AS row_num
+        FROM game_details gd
+            JOIN games g ON gd.game_id = g.game_id
+        WHERE g.game_date_est = '2016-10-04' --FILTER ON this date so we don't need TO see a lot OF data
+            
+    )
+    SELECT
+        game_date_est,
+        season,
+        team_id,
+        team_id = home_team_id AS dim_is_playing_at_home,
+        player_id,
+        player_name,
+        start_position,
+        COALESCE(POSITION('DNP' IN comment), 0) > 0 AS dim_did_not_play,
+        COALESCE(POSITION('DND' IN comment), 0) > 0 AS dim_did_not_dress,
+        COALESCE(POSITION('NWT' IN comment), 0) > 0 AS dim_not_with_team,
+        comment,
+        min,
+        fgm,
+        fga,
+        fg3m,
+        fg3a,
+        ftm,
+        fta,
+        oreb,
+        dreb,
+        reb,
+        ast,
+        stl,
+        blk,
+        "TO" AS turnovers,
+        pf,
+        pts,
+        plus_minus
+    FROM deduped
+    WHERE row_num = 1
+    ```
 
-- Dedupe between hours with FULL OUTER JOIN like branches of a tree
-    - FULL OUTER JOIN between hour 0 and 1, and then hour 2 and 3, and this will eliminate duplicates between each hour
-- Use left.value + right.value to keep duplicates aggregation correctly counting or CONCAT to build a continuous list
+    ![alt text](assets/image12.png)
 
-    ![alt text](assets/image7.png)
+- For the **`min`** column, we need to change minutes to fractions and from TEXT to REAL type.
 
-- Diagram of hourly deduping with daily microbatch:
+    ```sql
+    WITH deduped AS (
 
-    ![alt text](assets/image8.png)
+        SELECT 
+            g.game_date_est,
+            g.season,
+            g.home_team_id,
+            gd.*,
+            ROW_NUMBER() OVER(PARTITION BY gd.game_id, team_id, player_id ORDER BY g.game_date_est) AS row_num
+        FROM game_details gd
+            JOIN games g ON gd.game_id = g.game_id
+        WHERE g.game_date_est = '2016-10-04' --filter ON this date so we don't need to see a lot of data
+            
+    )
+    SELECT
+        game_date_est,
+        season,
+        team_id,
+        team_id = home_team_id AS dim_is_playing_at_home,
+        player_id,
+        player_name,
+        start_position,
+        COALESCE(POSITION('DNP' IN comment), 0) > 0 AS dim_did_not_play,
+        COALESCE(POSITION('DND' IN comment), 0) > 0 AS dim_did_not_dress,
+        COALESCE(POSITION('NWT' IN comment), 0) > 0 AS dim_not_with_team,
+        CAST(SPLIT_PART(min, ':', 1) AS REAL) + CAST(SPLIT_PART(min, ':', 2) AS REAL)/60 AS minutes,
+        fgm,
+        fga,
+        fg3m,
+        fg3a,
+        ftm,
+        fta,
+        oreb,
+        dreb,
+        reb,
+        ast,
+        stl,
+        blk,
+        "TO" AS turnovers,
+        pf,
+        pts,
+        plus_minus
+    FROM deduped
+    WHERE row_num = 1
+    ```
+- Let's create the DDL:
+
+     ```sql
+     CREATE TABLE fct_game_details (
+        dim_game_date DATE,
+        dim_season INTEGER,
+        dim_team_id INTEGER,
+        dim_player_id INTEGER,
+        dim_player_name TEXT,
+        dim_start_position TEXT,
+        dim_is_playing_at_home BOOLEAN,
+        dim_did_not_play BOOLEAN,
+        dim_did_not_dress BOOLEAN,
+        dim_not_with_team BOOLEAN,
+        m_minutes REAL,
+        m_fgm INTEGER,
+        m_fga INTEGER,
+        m_fg3m INTEGER,
+        m_fg3a INTEGER,
+        m_ftm INTEGER,
+        m_fta INTEGER,
+        m_oreb INTEGER,
+        m_dreb INTEGER,
+        m_reb INTEGER,
+        m_ast INTEGER,
+        m_stl INTEGER,
+        m_blk INTEGER,
+        m_turnovers INTEGER,
+        m_pf INTEGER,
+        m_pts INTEGER,
+        m_plus_minus INTEGER,
+        PRIMARY KEY (dim_game_date, dim_team_id, dim_player_id)
+    )
+     ```
+
+     ```sql
+    INSERT INTO fct_game_details
+
+    WITH deduped AS (
+
+        SELECT 
+            g.game_date_est,
+            g.season,
+            g.home_team_id,
+            gd.*,
+            ROW_NUMBER() OVER(PARTITION BY gd.game_id, team_id, player_id ORDER BY g.game_date_est) AS row_num
+        FROM game_details gd
+            JOIN games g ON gd.game_id = g.game_id
+            
+    )
+    SELECT
+        game_date_est AS dim_game_date,
+        season AS dim_season,
+        team_id AS dim_team_id,
+        player_id AS dim_player_id,
+        player_name AS dim_player_name,
+        start_position AS dim_start_position,
+        team_id = home_team_id AS dim_is_playing_at_home,
+        COALESCE(POSITION('DNP' IN comment), 0) > 0 AS dim_did_not_play,
+        COALESCE(POSITION('DND' IN comment), 0) > 0 AS dim_did_not_dress,
+        COALESCE(POSITION('NWT' IN comment), 0) > 0 AS dim_not_with_team,
+        CAST(SPLIT_PART(min, ':', 1) AS REAL) + CAST(SPLIT_PART(min, ':', 2) AS REAL)/60 AS m_minutes,
+        fgm AS m_fgm,
+        fga AS m_fgm,
+        fg3m AS m_fg3m,
+        fg3a AS m_fg3a,
+        ftm AS m_ftm,
+        fta AS m_fta,
+        oreb AS m_oreb,
+        dreb AS m_dreb,
+        reb AS m_reb,
+        ast AS m_ast,
+        stl AS m_stl,
+        blk AS m_blk,
+        "TO" AS m_turnovers,
+        pf AS m_pf,
+        pts AS m_pts,
+        plus_minus AS m_plus_minus
+    FROM deduped
+    WHERE row_num = 1;
+     ```
+
+    ![alt text](assets/image13.png)
+
+- The naming conventions help people to be aware of what action we can perform with the columns for example:
+    - Columns that start with `dim` are columns that we should filter on and do a GROUP BY on.
+    - Columns that start with `m` are columns that we should aggregates and do all sort of math calculations on.
+- Let's find the player in NBA who bailed out on the most games. We will find the percentage of bails from the total games played by each player.
+
+    ```sql
+    SELECT
+        dim_player_name,
+        COUNT(1) AS num_games,
+        COUNT(CASE WHEN dim_not_with_team THEN 1 END) AS bailed_num,
+        CAST(COUNT(CASE WHEN dim_not_with_team THEN 1 END) AS REAL)/COUNT(1) AS bail_pct
+    FROM fct_game_details
+    GROUP BY 1
+    ORDER BY 4 DESC
+    ```
+
+    ![alt text](assets/image14.png)
+
+- From the above query, we can see that fact data modeling is powerful and we were able to answer some cool questions with the dataset that would have been difficult to answer using the old data model.
